@@ -72,16 +72,89 @@ class BookmarkFileManagerTest {
         assertTrue(fileManager.saveCollections(original))
         val reloaded = fileManager.loadCollections()
 
-        // Compares identity and content rather than whole objects: BookmarkSerializer
-        // leaves kotlinx encodeDefaults at false, so defaulted fields — createdAt
-        // among them — are never written and are regenerated on load. A whole-object
-        // assertion only passes when save and reload land in the same millisecond.
-        assertEquals(original.map { it.id }, reloaded.map { it.id })
-        assertEquals(original.map { it.name }, reloaded.map { it.name })
+        // Whole objects, which this test could not assert before #7 / #9 were fixed:
+        // BookmarkSerializer left kotlinx encodeDefaults at false, so `createdAt` was
+        // omitted whenever a record was serialized in the millisecond it was created
+        // and re-invented on load, and this comparison passed only by luck of timing.
+        // Now the document carries the timestamps, so equality is the honest claim.
+        assertEquals(original, reloaded)
+    }
+
+    @Test
+    fun `timestamps survive a real save and reload`() = runBlocking {
+        // The same durability as BookmarkSerializerTest, through the file: a bulk
+        // import saves records in the millisecond it builds them.
+        val original = (1..20).map { round ->
+            BookmarkCollection(
+                id = "c-$round",
+                name = "Round $round",
+                bookmarks = listOf(
+                    Bookmark(
+                        id = "b-$round",
+                        tabConfig = TabConfig(type = "browser", title = "t", url = "https://example.com/$round"),
+                        workspaceName = "",
+                    ),
+                ),
+            )
+        }
+
+        assertTrue(fileManager.saveCollections(original))
+        val reloaded = fileManager.loadCollections()
+
+        assertEquals(original.map { it.createdAt }, reloaded.map { it.createdAt })
         assertEquals(
-            original.map { c -> c.bookmarks.map { it.id to it.tabConfig.url } },
-            reloaded.map { c -> c.bookmarks.map { it.id to it.tabConfig.url } },
+            original.flatMap { c -> c.bookmarks.map { it.createdAt } },
+            reloaded.flatMap { c -> c.bookmarks.map { it.createdAt } },
         )
+    }
+
+    @Test
+    fun `a file written by an older build is dated from the file and stays put`() = runBlocking {
+        // What every existing user has on disk: records with no createdAt at all.
+        // Loading one used to date it to "now", differently on every load.
+        val collectionsFile = File(tempDir, BookmarkFileManager.COLLECTIONS_FILE)
+        collectionsFile.writeText(
+            """
+            [
+              {
+                "id": "c",
+                "name": "Work",
+                "bookmarks": [
+                  {
+                    "id": "b",
+                    "tabConfig": { "type": "browser", "title": "t", "url": "https://example.com" },
+                    "workspaceName": ""
+                  }
+                ]
+              }
+            ]
+            """.trimIndent(),
+        )
+        val writtenAt = collectionsFile.lastModified()
+
+        val first = fileManager.loadCollections()
+        Thread.sleep(5)
+        val second = fileManager.loadCollections()
+
+        assertEquals(writtenAt, first.single().createdAt)
+        assertEquals(writtenAt, first.single().bookmarks.single().createdAt)
+        // No write-back is involved: the fallback is stable because the file is.
+        assertEquals(first, second)
+    }
+
+    @Test
+    fun `a legacy timestamp is made real by the next save`() = runBlocking {
+        val collectionsFile = File(tempDir, BookmarkFileManager.COLLECTIONS_FILE)
+        collectionsFile.writeText("""[{ "id": "c", "name": "Work", "bookmarks": [] }]""")
+        val writtenAt = collectionsFile.lastModified()
+
+        val loaded = fileManager.loadCollections()
+        assertTrue(fileManager.saveCollections(loaded))
+
+        // The rewritten file carries the value, so it no longer depends on the
+        // file's own mtime - which the save has just changed.
+        assertTrue(collectionsFile.readText().contains("\"createdAt\": $writtenAt"))
+        assertEquals(writtenAt, fileManager.loadCollections().single().createdAt)
     }
 
     /** Identity of the file currently at [path], or null if it has none. */

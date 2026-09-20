@@ -39,6 +39,11 @@ build.gradle.kts   → Build config + version (single source of truth)
 - Providers from `PluginContext`: `workspaceDataProvider`, `splitViewOperations`, `contextMenuProvider`, `activeTabsProvider`
 - Null-safe provider access: providers may be null, UI must handle gracefully
 
+### Persistence
+- `collections.json` / `favorite-workspaces.json` are written through `BookmarkFileManager.writeAtomically` (temp file + `force` + atomic move). Never add a plain `writeText` save path.
+- **`BookmarkSerializer` sets `encodeDefaults = true`, and it has to stay on.** kotlinx omits a defaulted field when the value matches the default *re-evaluated at encode time*, and `Bookmark.createdAt`, `BookmarkCollection.createdAt` and `FavoriteWorkspace.markedAt` all default to `Clock.System.now()`. With it off, a record saved in the millisecond it was created lost its timestamp and every load invented a new one (#7, #9).
+- Records written by older builds carry no timestamp, so they are stamped on load with the file's last-modified time rather than the clock: the same answer on every load, and the next save replaces it with a real value.
+
 ### Dependencies
 - **boss-plugin-api**: compileOnly (provided by host app at runtime)
 - **Compose Desktop**: UI framework

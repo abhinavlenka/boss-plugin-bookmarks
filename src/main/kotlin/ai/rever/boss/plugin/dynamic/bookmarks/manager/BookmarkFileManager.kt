@@ -197,6 +197,22 @@ internal open class BookmarkFileManager(
     }
 
     /**
+     * When [file] was last written, for records that carry no timestamp of their own.
+     *
+     * Records written before timestamps were persisted have no `createdAt`, and the
+     * constructor default that fills one in is `Clock.System.now()` - a value that
+     * would be different on every load (#7, #9). The file's own modification time is
+     * the closest evidence available and, unlike `now()`, it does not change until
+     * the file does.
+     *
+     * `lastModified()` answers 0 when it cannot tell, which would date every legacy
+     * bookmark to 1970; the clock is a better wrong answer than the epoch, and the
+     * next save replaces it with a real value either way.
+     */
+    private fun writtenAt(file: File): Long =
+        file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
+
+    /**
      * Remove temp files a previous run left behind.
      *
      * The write path cleans up after itself on failure, but a kill -9 or power
@@ -264,7 +280,7 @@ internal open class BookmarkFileManager(
 
                 val json = file.readText()
                 try {
-                    BookmarkSerializer.deserializeCollections(json)
+                    BookmarkSerializer.deserializeCollections(json, writtenAt(file))
                 } catch (parseError: Exception) {
                     // An unparseable file is about to be replaced by a fresh
                     // [Favorites] document — and now that writes are atomic, that
@@ -324,7 +340,7 @@ internal open class BookmarkFileManager(
                 }
 
                 val json = file.readText()
-                BookmarkSerializer.deserializeFavoriteWorkspaces(json)
+                BookmarkSerializer.deserializeFavoriteWorkspaces(json, writtenAt(file))
             } catch (e: Exception) {
                 logger.warn(LogCategory.FILE, "Error loading favorite workspaces", error = e)
                 emptyList()
