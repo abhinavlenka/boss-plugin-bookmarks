@@ -39,6 +39,10 @@ build.gradle.kts   → Build config + version (single source of truth)
 - Providers from `PluginContext`: `workspaceDataProvider`, `splitViewOperations`, `contextMenuProvider`, `activeTabsProvider`
 - Null-safe provider access: providers may be null, UI must handle gracefully
 
+### Collection identity
+- **`isFavorite` is what makes a collection Favorites, not its name.** The name is the user's to change; `withSingleFavorites` repairs a file on load by promoting a collection named `Favorites` that lacks the flag and demoting any flagged one after the first (which the panel cannot show and `deleteCollection` refuses to remove). Never test for Favorites by name (#10).
+- Adds resolve by name (`addBookmark` / `addBookmarks`), so `createCollection` and `renameCollection` suffix a taken name (`Work (2)`) rather than allowing two collections to share one. Duplicates already on disk are logged by `withDistinctIds`, not renamed.
+
 ### Dependencies
 - **boss-plugin-api**: compileOnly (provided by host app at runtime)
 - **Compose Desktop**: UI framework

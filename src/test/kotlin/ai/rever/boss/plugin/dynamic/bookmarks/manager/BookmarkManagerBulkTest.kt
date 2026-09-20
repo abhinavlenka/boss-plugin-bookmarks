@@ -199,21 +199,25 @@ class BookmarkManagerBulkTest {
     }
 
     @Test
-    fun `a duplicate collection name files everything into the first match`() = runBlocking {
-        // createCollection allows duplicate names, and addBookmarks resolves by
-        // indexOfFirst. Pinning the behaviour so it is a decision, not a
-        // surprise, if someone changes the resolution later.
+    fun `a second collection asking for a taken name gets a name of its own`() = runBlocking {
+        // This used to pin the opposite: two collections could share a name, and every
+        // add by name went to whichever came first while the other could never be added
+        // to. That was left as "a decision, not a surprise, if someone changes the
+        // resolution later" - #10 is that decision, and createCollection now suffixes.
         manager.createCollection("Twin")
         manager.createCollection("Twin")
-        awaitThat("both collections to exist") { manager.collections.value.count { it.name == "Twin" } == 2 }
+        awaitThat("both collections to exist") {
+            manager.collections.value.count { it.name.startsWith("Twin") } == 2
+        }
 
         manager.addBookmarks("Twin", listOf(bookmark(9)))
         awaitThat("the bookmark to land") {
             manager.collections.value.first { it.name == "Twin" }.bookmarks.isNotEmpty()
         }
 
-        val twins = manager.collections.value.filter { it.name == "Twin" }
-        assertEquals(2, twins.size, "addBookmarks must not create a third")
+        val twins = manager.collections.value.filter { it.name.startsWith("Twin") }
+        assertEquals(listOf("Twin", "Twin (2)"), twins.map { it.name })
+        // The add is now unambiguous rather than merely first-wins.
         assertEquals(1, twins.first().bookmarks.size)
         assertEquals(0, twins.last().bookmarks.size)
     }

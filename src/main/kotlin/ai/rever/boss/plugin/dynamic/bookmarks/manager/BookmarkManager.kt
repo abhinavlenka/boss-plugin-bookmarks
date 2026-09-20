@@ -89,11 +89,13 @@ class BookmarkManager internal constructor(
                 // Repair id collisions before anything keys off an id. Files
                 // written by older versions can hold two collections under one
                 // id — see withDistinctIds.
-                val loaded = withDistinctIds(onDisk)
+                // Then settle which collection *is* Favorites, by the flag the panel
+                // reads rather than by name - see withSingleFavorites.
+                val loaded = withSingleFavorites(withDistinctIds(onDisk))
 
-                // Ensure "Favorites" collection exists
+                // Ensure a "Favorites" collection exists
                 val withFavorites =
-                    if (loaded.none { it.name == BookmarkCollection.FAVORITES_NAME }) {
+                    if (loaded.none { it.isFavorite }) {
                         listOf(
                             BookmarkCollection(
                                 id = newCollectionId(),
@@ -154,7 +156,7 @@ class BookmarkManager internal constructor(
                 // Same merge rule as the success path: never clobber a mutation
                 // that arrived while the load was in flight.
                 _collections.update { pending ->
-                    if (pending.any { it.name == BookmarkCollection.FAVORITES_NAME }) {
+                    if (pending.any { it.isFavorite }) {
                         pending
                     } else {
                         listOf(
@@ -298,6 +300,90 @@ class BookmarkManager internal constructor(
     }
 
     /**
+     * Return [collections] with exactly one collection carrying [BookmarkCollection.isFavorite],
+     * where that is possible without inventing one.
+     *
+     * **The flag is the identity; the name is not.** Two representations of "this is
+     * the Favorites collection" were in use: [loadAllData] tested the name, while
+     * [getFavoritesCollection] and the panel test the flag. A `collections.json`
+     * holding a collection *named* Favorites without the flag - which
+     * `BookmarkCollection(id, name = "Favorites")` produces, since the flag defaults to
+     * false - satisfied the first and not the second, so no Favorites section rendered
+     * at all and the name-only collection sat in the ordinary list offering
+     * "Delete Collection". Issue #10.
+     *
+     * The flag wins because it survives a rename: a user who renames Favorites to
+     * "Starred" still has their Favorites collection, whereas under the name rule the
+     * next load would decide Favorites was missing and prepend a second one.
+     *
+     * Two repairs, both minimal:
+     *
+     * - **Promote** the first collection named Favorites when nothing is flagged. It is
+     *   what the user has been calling Favorites; giving it the flag is what makes the
+     *   panel show it again.
+     * - **Demote** any flagged collection after the first. Only the first is reachable:
+     *   `find { it.isFavorite }` returns it and the collection list filters
+     *   `!it.isFavorite`, so a second flagged collection is invisible *and* undeletable,
+     *   since [deleteCollection] refuses to remove a flagged one.
+     *
+     * Names are never changed here, and a list that already holds exactly one flagged
+     * collection is returned unchanged - identity included, so an untouched file
+     * compares equal to what was loaded and no save is scheduled.
+     */
+    internal fun withSingleFavorites(collections: List<BookmarkCollection>): List<BookmarkCollection> {
+        val flagged = collections.count { it.isFavorite }
+        if (flagged == 1) return collections
+
+        if (flagged == 0) {
+            val promote = collections.indexOfFirst { it.name == BookmarkCollection.FAVORITES_NAME }
+            if (promote < 0) return collections
+            logger.warn(
+                LogCategory.UI,
+                "A collection named Favorites was not flagged as one; adopting it rather than adding a second",
+                mapOf("id" to collections[promote].id),
+            )
+            return collections.toMutableList().also { it[promote] = it[promote].copy(isFavorite = true) }
+        }
+
+        logger.warn(
+            LogCategory.UI,
+            "More than one collection is flagged as Favorites; keeping the first",
+            mapOf("count" to flagged.toString()),
+        )
+        var kept = false
+        return collections.map { collection ->
+            when {
+                !collection.isFavorite -> collection
+                !kept -> collection.also { kept = true }
+                // Demoted rather than dropped: it holds the user's bookmarks, and now
+                // that it is unflagged the panel lists it and it can be deleted.
+                else -> collection.copy(isFavorite = false)
+            }
+        }
+    }
+
+    /**
+     * [desired], or the first " (n)" variant of it that no collection in [taken] holds.
+     *
+     * Adds resolve their target with `indexOfFirst { it.name == … }`, so two collections
+     * sharing a name means every add goes to whichever comes first and the other can
+     * never be added to by name (#10). Nothing stopped that: [createCollection] appends
+     * unconditionally and [renameCollection] did no uniqueness check.
+     *
+     * Suffixing is what a browser does on import, and it is visible in the panel, which
+     * an ambiguity that silently misroutes bookmarks is not. Duplicates already on disk
+     * are left alone - see [withDistinctIds], which logs them rather than renaming a
+     * user's collections behind their back.
+     */
+    private fun uniqueName(desired: String, taken: List<BookmarkCollection>): String {
+        val names = taken.mapTo(HashSet()) { it.name }
+        if (desired !in names) return desired
+        var suffix = 2
+        while ("$desired ($suffix)" in names) suffix++
+        return "$desired ($suffix)"
+    }
+
+    /**
      * Return [collections] with every collection id, and every bookmark id,
      * distinct — repairing what older versions already wrote to disk.
      *
@@ -321,6 +407,9 @@ class BookmarkManager internal constructor(
         // than the ambiguity. But addBookmark/addBookmarks resolve with
         // `indexOfFirst { it.name == … }`, so every add lands in whichever comes
         // first, and that is worth being able to see in a log. See issue #10.
+        //
+        // New ones can no longer be created: createCollection and renameCollection
+        // both go through uniqueName. This is for files written before that.
         val duplicateNames =
             collections.groupingBy { it.name }.eachCount().filterValues { it > 1 }.keys
         if (duplicateNames.isNotEmpty()) {
@@ -580,7 +669,13 @@ class BookmarkManager internal constructor(
                         // collection named Favorites that getFavoritesCollection()
                         // — which matches on the flag — cannot find, and that
                         // deleteCollection would happily remove.
-                        isFavorite = collectionName == BookmarkCollection.FAVORITES_NAME,
+                        //
+                        // Only when there is no Favorites collection already, though: if
+                        // the user renamed theirs, an import into "Favorites" would
+                        // otherwise flag a second one, and a second flagged collection is
+                        // invisible in the panel and undeletable (#10).
+                        isFavorite = collectionName == BookmarkCollection.FAVORITES_NAME &&
+                            current.none { it.isFavorite },
                     )
             }
         }
@@ -743,9 +838,27 @@ class BookmarkManager internal constructor(
      * Create a new bookmark collection.
      */
     fun createCollection(name: String): BookmarkCollection {
-        val collection = BookmarkCollection(id = newCollectionId(), name = name)
-        mutateCollections { current -> current + collection }
-        return collection
+        // Asking for "Favorites" means the Favorites collection, so hand back the one
+        // that exists rather than appending a second collection by that name which the
+        // panel would never show as Favorites (#10). When there is none, the new one is
+        // flagged, because a collection called Favorites without the flag is precisely
+        // the stuck state withSingleFavorites exists to repair.
+        val wantsFavorites = name == BookmarkCollection.FAVORITES_NAME
+        var created = BookmarkCollection(id = newCollectionId(), name = name, isFavorite = wantsFavorites)
+        mutateCollections { current ->
+            // Inside the transform, so the name is unique against the list this actually
+            // appends to - mutateCollections re-runs on CAS contention, and two imports
+            // racing would otherwise both resolve the same free name.
+            val existingFavorites = current.find { it.isFavorite }
+            if (wantsFavorites && existingFavorites != null) {
+                created = existingFavorites
+                current
+            } else {
+                created = created.copy(name = uniqueName(name, current))
+                current + created
+            }
+        }
+        return created
     }
 
     /**
@@ -774,7 +887,11 @@ class BookmarkManager internal constructor(
             if (index < 0) {
                 current
             } else {
-                current.toMutableList().also { it[index] = it[index].copy(name = newName) }
+                // Unique against the others, so a rename cannot create the ambiguity
+                // adds resolve by name into (#10). The collection keeps whatever flag it
+                // has: Favorites renamed to "Starred" is still Favorites.
+                val name = uniqueName(newName, current.filterNot { it.id == collectionId })
+                current.toMutableList().also { it[index] = it[index].copy(name = name) }
             }
         }
     }

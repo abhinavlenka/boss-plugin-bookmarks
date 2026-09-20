@@ -399,7 +399,7 @@ class BookmarkManagerIdTest {
     }
 
     @Test
-    fun `two same-named collections created during the load window both survive`() {
+    fun `two collections created during the load window both survive`() {
         // mergeLoadedWithPending's name fallback exists to match a pending
         // collection against one the *disk* knows under a different id. It used
         // to match pendings against each other too, because they were folded into
@@ -413,8 +413,13 @@ class BookmarkManagerIdTest {
             val first = gated.createCollection("Twin")
             val second = gated.createCollection("Twin")
             assertNotEquals(first.id, second.id, "createCollection minted a duplicate id")
-            // Same shape as BookmarkManagerBulkTest's duplicate-name test, which
-            // is what caught this: it raced the load and failed on CI only.
+            // The historical trigger was a shared name, which collapsed the second onto
+            // the first as the merge folded pendings into one map. createCollection now
+            // suffixes (#10), so these are "Twin" and "Twin (2)" and the collapse is
+            // unreachable from the public API - but the property under test is that a
+            // collection created during the load window keeps its own identity, and that
+            // is still worth holding the merge to.
+            assertEquals("Twin (2)", second.name)
             gated.addBookmarks("Twin", listOf(bookmark("b1")))
 
             gate.countDown()
@@ -422,7 +427,7 @@ class BookmarkManagerIdTest {
                 gated.collections.value.any { it.name == BookmarkCollection.FAVORITES_NAME }
             }
 
-            val twins = gated.collections.value.filter { it.name == "Twin" }
+            val twins = gated.collections.value.filter { it.name.startsWith("Twin") }
             assertEquals(2, twins.size, "a collection created during the load window was lost")
             assertEquals(
                 setOf(first.id, second.id),
