@@ -520,7 +520,7 @@ class BookmarkManager internal constructor(
     /**
      * Combine what was on disk with whatever landed while the load was running.
      *
-     * Collections are matched by id, falling back to name for a pending
+     * Collections are matched by id, then Favorites flag, falling back to name for a pending
      * collection the loaded set knows under a different id. Bookmarks are
      * unioned and de-duplicated by id, so an import into an existing collection
      * survives instead of being replaced by the disk copy.
@@ -574,6 +574,9 @@ class BookmarkManager internal constructor(
         pending.forEach { p ->
             val match =
                 merged[p.id]
+                    ?: merged.values.firstOrNull {
+                        p.isFavorite && it.isFavorite && it.id in unclaimedFromDisk
+                    }
                     ?: merged.values.firstOrNull { it.id in unclaimedFromDisk && it.name == p.name }
             if (match == null) {
                 merged[p.id] = p
@@ -587,11 +590,19 @@ class BookmarkManager internal constructor(
                 merged[match.id] =
                     p.copy(
                         id = match.id,
+                        // A pending import created before load has not renamed the
+                        // on-disk Favorites. Match its flag even when the user has
+                        // called the saved collection Starred, and keep that name.
+                        name = if (
+                            p.id != match.id && p.isFavorite && match.isFavorite &&
+                            p.name == BookmarkCollection.FAVORITES_NAME
+                        ) match.name else p.name,
+                        isFavorite = p.isFavorite || match.isFavorite,
                         bookmarks = (p.bookmarks + match.bookmarks).distinctBy { it.id },
                     )
             }
         }
-        return merged.values.toList()
+        return withSingleFavorites(merged.values.toList())
     }
 
     // ==================== Bookmark Operations ====================

@@ -240,6 +240,90 @@ class BookmarkFavoritesIdentityTest {
         assertEquals(listOf("Twin", "Twin"), loaded.filter { it.name == "Twin" }.map { it.name })
     }
 
+    @Test
+    fun `import during load joins renamed Favorites without hiding either bookmark`() {
+        val saved = collection("saved", "Starred", isFavorite = true).copy(bookmarks = listOf(bookmark("old")))
+        duringLoad(listOf(saved)) { loading, release ->
+            loading.addBookmarks("Favorites", listOf(bookmark("imported")))
+            release()
+            awaitThat("Favorites to merge") { loading.collections.value.any { it.id == "saved" } }
+            val favorite = loading.collections.value.single { it.isFavorite }
+            assertEquals("Starred", favorite.name)
+            assertEquals(setOf("old", "imported"), favorite.bookmarks.map { it.id }.toSet())
+            assertEquals(1, loading.collections.value.size)
+        }
+    }
+
+    @Test
+    fun `Favorites flag wins over a same named ordinary destination during load`() {
+        val saved = listOf(
+            collection("saved", "Starred", isFavorite = true),
+            collection("ordinary", "Favorites").copy(bookmarks = listOf(bookmark("ordinary-bookmark"))),
+        )
+        duringLoad(saved) { loading, release ->
+            loading.addBookmarks("Favorites", listOf(bookmark("imported")))
+            release()
+            awaitThat("saved collections to merge") { loading.collections.value.any { it.id == "saved" } }
+            assertEquals(listOf("imported"), loading.getFavoritesCollection().bookmarks.map { it.id })
+            assertEquals(listOf("ordinary-bookmark"), loading.collections.value.single { it.id == "ordinary" }.bookmarks.map { it.id })
+            assertEquals(1, loading.collections.value.count { it.isFavorite })
+        }
+    }
+
+    @Test
+    fun `a Favorites rename made during load survives the identity merge`() {
+        duringLoad(listOf(collection("saved", "Favorites", isFavorite = true))) { loading, release ->
+            val pending = loading.createCollection("Favorites")
+            loading.renameCollection(pending.id, "Starred")
+            release()
+            awaitThat("the renamed Favorites to merge") { loading.collections.value.any { it.id == "saved" } }
+            assertEquals("Starred", loading.getFavoritesCollection().name)
+            assertEquals(1, loading.collections.value.size)
+        }
+    }
+
+    @Test
+    fun `concurrent creates reserve distinct names and return the actual collection`() {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val created = java.util.concurrent.ConcurrentLinkedQueue<BookmarkCollection>()
+        val threads = List(32) {
+            Thread {
+                gate.await()
+                created.add(manager.createCollection("Concurrent"))
+            }.apply { start() }
+        }
+        gate.countDown()
+        threads.forEach { it.join(5_000) }
+        assertTrue(threads.none { it.isAlive }, "a concurrent create did not finish")
+        assertEquals(32, created.size)
+        assertEquals(32, created.map { it.name }.toSet().size)
+        created.forEach { returned ->
+            assertEquals(returned, manager.collections.value.single { it.id == returned.id })
+        }
+    }
+
+    private fun duringLoad(
+        saved: List<BookmarkCollection>,
+        action: (BookmarkManager, () -> Unit) -> Unit,
+    ) {
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val dir = Files.createTempDirectory("bookmark-favorites-gated").toFile()
+        val files = object : BookmarkFileManager(dir.absolutePath) {
+            override suspend fun loadCollections(): List<BookmarkCollection> {
+                gate.await()
+                return saved
+            }
+        }
+        val loading = BookmarkManager(files)
+        try {
+            action(loading) { gate.countDown() }
+        } finally {
+            gate.countDown()
+            runBlocking { loading.close() }
+            dir.deleteRecursively()
+        }
+    }
+
     // ------------------------------------------------------------ helpers
 
     /** Run a manager over [json] already on disk, and return what it settled on. */
